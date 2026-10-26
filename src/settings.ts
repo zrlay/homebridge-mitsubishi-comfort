@@ -70,6 +70,10 @@ export interface KumoConfig {
   // reach the heat pump's louver (observed by the fork's author). Swing on/off is on
   // the unit's tile regardless (on units with `hasVaneSwing`).
   exposeVaneSlat?: boolean;
+  // ---- Household preferences (fork-only, see src/household.ts) ----
+  hideAutoMode?: boolean;
+  autoModeSwitch?: boolean;
+  keepModeOnTempChange?: boolean;
 }
 
 /** A one-way mirror: `target` follows `source` (both device serials). */
