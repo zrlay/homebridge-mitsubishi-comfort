@@ -7,6 +7,9 @@ import {
   DRY_SWITCH_NAME, FAN_ONLY_SWITCH_NAME, FAN_AUTO_SWITCH_NAME,
 } from './settings';
 import { cToF, quantizeSetpointInRange } from './temperature';
+import {
+  AUTO_MODE_SWITCH_NAME, HouseholdPrefs, householdPrefs, heatCoolInPlaceOfAuto, shouldKeepMode,
+} from './household';
 
 // HeaterCooler implementation (2.0): portions derived from
 // homebridge-mitsubishi-heatpump (ukaratay, Apache-2.0, src/accessory.ts @ 83dfd18),
@@ -266,6 +269,7 @@ export class KumoThermostatAccessory {
     this.service.getCharacteristic(this.platform.Characteristic.TargetHeaterCoolerState)
       .onGet(this.getTargetHeaterCoolerState.bind(this))
       .onSet(this.setTargetHeaterCoolerState.bind(this));
+    this.applyHouseholdTile();
 
     this.service.getCharacteristic(this.platform.Characteristic.CurrentTemperature)
       .onGet(this.getCurrentTemperature.bind(this));
@@ -401,7 +405,7 @@ export class KumoThermostatAccessory {
     // Offer only the modes the unit can do. AUTO needs both directions.
     const T = this.platform.Characteristic.TargetHeaterCoolerState;
     const modes: number[] = profile.hasModeHeat ? [T.AUTO, T.HEAT, T.COOL] : [T.COOL];
-    this.service.getCharacteristic(T).setProps({ validValues: modes });
+    this.service.getCharacteristic(T).setProps({ validValues: this.householdModes(modes) });
 
     this.applyFanSpeedCount(profile.numberOfFanSpeeds);
 
@@ -457,6 +461,7 @@ export class KumoThermostatAccessory {
     } else {
       this.removeFanAutoSwitch();
     }
+    this.applyAutoModeSwitch(profile);
 
     // Controls added above (auto fan, swing, the switches) start with defaults. On an
     // offline unit, cover them with No Response too.
@@ -1137,6 +1142,7 @@ export class KumoThermostatAccessory {
     this.fanOnlyService?.updateCharacteristic(C.On, err as never);
     this.dryService?.updateCharacteristic(C.On, err as never);
     this.fanAutoService?.updateCharacteristic(C.On, err as never);
+    this.autoModeService?.updateCharacteristic(C.On, err as never);
   }
 
   /** Re-publish real values on recovery so the tile clears without waiting for a read. */
@@ -1885,6 +1891,7 @@ export class KumoThermostatAccessory {
 
   private modeToTargetState(mode: string): number {
     const T = this.platform.Characteristic.TargetHeaterCoolerState;
+    mode = this.householdTargetMode(mode);
     if (this.isAutoMode(mode)) {
       return T.AUTO;
     }
@@ -1909,6 +1916,7 @@ export class KumoThermostatAccessory {
       C.TargetHeaterCoolerState, this.mapToTargetHeaterCoolerState(this.currentStatus));
     this.fanService?.updateCharacteristic(C.Active, this.mapToActive(this.currentStatus));
     this.fanService?.updateCharacteristic(C.CurrentFanState, this.mapToCurrentFanState(this.currentStatus));
+    this.autoModeService?.updateCharacteristic(C.On, this.isAutoModeActive(this.currentStatus));
   }
 
   /** Push both setpoints (thresholds) from a status, skipping missing values. */
@@ -1984,6 +1992,7 @@ export class KumoThermostatAccessory {
     const mode = this.normalizeSendMode(status.operationMode);
     if (mode && this.accessory.context) {
       this.accessory.context.lastActiveMode = mode;
+      this.rememberHeatCool(mode);
     }
   }
 
@@ -1999,7 +2008,7 @@ export class KumoThermostatAccessory {
   }
 
   private lastActiveMode(): ActiveMode {
-    return this.normalizeSendMode(this.accessory.context?.lastActiveMode) ?? this.defaultOnMode();
+    return this.householdOnMode(this.normalizeSendMode(this.accessory.context?.lastActiveMode) ?? this.defaultOnMode());
   }
 
   /** Power-on mode with nothing remembered: AUTO where it exists, else COOL. */
@@ -2199,6 +2208,7 @@ export class KumoThermostatAccessory {
     const name = this.accessory.displayName;
     const fan = this.resolveFan(intent);
     const vane = this.resolveVane(intent);
+    this.dropSirisModeGuess(intent);
     let operationMode: 'off' | ActiveMode;
     if (intent.active === false) {
       operationMode = 'off';
@@ -2732,6 +2742,7 @@ export class KumoThermostatAccessory {
       : this.platform.Characteristic.CoolingThresholdTemperature;
     const label = field === 'spHeat' ? 'HEAT SP' : 'COOL SP';
     const fallback = field === 'spHeat' ? 20 : 24;
+    this.lastSetpointWriteAt = Date.now();
 
     const tempF = (temp * 9 / 5) + 32;
     this.platform.log.info(
@@ -2988,5 +2999,136 @@ export class KumoThermostatAccessory {
 
     // Note: No per-device polling timer to clean up
     // Polling is handled at the platform level
+  }
+
+  // ---- Household preferences (fork-only, see src/household.ts) -------------
+
+  private autoModeService: Service | null = null;
+  private lastSetpointWriteAt = 0;
+
+  private get household(): HouseholdPrefs {
+    return householdPrefs(this.platform.kumoConfig);
+  }
+
+  /** Called from the constructor: hide AUTO on the tile, adopt a cached Auto Mode switch. */
+  private applyHouseholdTile(): void {
+    const T = this.platform.Characteristic.TargetHeaterCoolerState;
+    if (this.household.hideAutoMode) {
+      this.service.getCharacteristic(T).setProps({ validValues: this.householdModes([T.AUTO, T.HEAT, T.COOL]) });
+    }
+    if (this.household.autoModeSwitch &&
+      this.accessory.getServiceById(this.platform.Service.Switch, 'auto-mode')) {
+      this.setupAutoModeSwitch();
+    }
+  }
+
+  /** The tile's TargetHeaterCoolerState choices, minus AUTO when it's hidden. */
+  private householdModes(modes: number[]): number[] {
+    const T = this.platform.Characteristic.TargetHeaterCoolerState;
+    return this.household.hideAutoMode ? modes.filter((m) => m !== T.AUTO) : modes;
+  }
+
+  /** With AUTO hidden, the tile shows a unit in auto as heat or cool. */
+  private householdTargetMode(mode: string): string {
+    if (!this.household.hideAutoMode || !this.isAutoMode(mode)) {
+      return mode;
+    }
+    return heatCoolInPlaceOfAuto(
+      mode, this.accessory.context?.lastHeatCoolMode, this.deviceProfile?.hasModeHeat !== false);
+  }
+
+  /** With AUTO hidden, power-on resumes the last heat/cool mode instead of auto. */
+  private householdOnMode(mode: ActiveMode): ActiveMode {
+    if (!this.household.hideAutoMode || mode !== 'auto') {
+      return mode;
+    }
+    return heatCoolInPlaceOfAuto(
+      mode, this.accessory.context?.lastHeatCoolMode, this.deviceProfile?.hasModeHeat !== false);
+  }
+
+  private rememberHeatCool(mode: ActiveMode): void {
+    if (mode === 'heat' || mode === 'cool') {
+      this.accessory.context.lastHeatCoolMode = mode;
+    }
+  }
+
+  /** keepModeOnTempChange: drop a mode HomeKit sent along with a temperature change. */
+  private dropSirisModeGuess(intent: Intent): void {
+    if (!intent.mode || !shouldKeepMode(this.household, this.currentStatus?.operationMode,
+      this.currentStatus?.power, intent.mode, this.lastSetpointWriteAt)) {
+      return;
+    }
+    this.platform.log.info(
+      `[MODE CHANGE] ${this.accessory.displayName}: ignoring ${intent.mode.toUpperCase()} sent with a ` +
+      `temperature change, staying in ${this.currentStatus!.operationMode.toUpperCase()} (keepModeOnTempChange)`,
+    );
+    delete intent.mode;
+  }
+
+  private applyAutoModeSwitch(profile: DeviceProfile): void {
+    if (this.household.autoModeSwitch && profile.hasModeHeat) {
+      this.setupAutoModeSwitch();
+    } else {
+      this.removeAutoModeSwitch();
+    }
+  }
+
+  private setupAutoModeSwitch(): void {
+    if (this.autoModeService) {
+      return;
+    }
+    const existing = this.accessory.getServiceById(this.platform.Service.Switch, 'auto-mode');
+    this.autoModeService =
+      existing ||
+      this.accessory.addService(this.platform.Service.Switch, AUTO_MODE_SWITCH_NAME, 'auto-mode');
+    this.nameSwitch(this.autoModeService, AUTO_MODE_SWITCH_NAME, 'Auto Mode');
+    this.unlinkFromTile(this.autoModeService);
+    this.autoModeService.getCharacteristic(this.platform.Characteristic.On)
+      .onGet(this.getAutoModeOn.bind(this))
+      .onSet(this.setAutoModeOn.bind(this));
+    if (this.isReachable()) {
+      this.autoModeService.updateCharacteristic(
+        this.platform.Characteristic.On, this.isAutoModeActive(this.currentStatus));
+    }
+    if (!existing) {
+      this.publishStructureChange();
+    }
+    this.platform.log.debug(`Added Auto Mode switch for ${this.accessory.displayName}`);
+  }
+
+  private removeAutoModeSwitch(): void {
+    const existing = this.accessory.getServiceById(this.platform.Service.Switch, 'auto-mode');
+    if (existing) {
+      this.accessory.removeService(existing);
+      this.publishStructureChange();
+    }
+    this.autoModeService = null;
+  }
+
+  /** On only while the unit is on in auto, like the Dry and Fan Only switches. */
+  private isAutoModeActive(status: DeviceStatus | null): boolean {
+    return status !== null && this.mapToActive(status) === this.platform.Characteristic.Active.ACTIVE &&
+      this.isAutoMode(status.operationMode);
+  }
+
+  async getAutoModeOn(): Promise<CharacteristicValue> {
+    this.assertReachable();
+    return this.isAutoModeActive(this.currentStatus);
+  }
+
+  /** On: switch to auto (powering on if needed). Off: turn the unit off, if it's in auto. */
+  async setAutoModeOn(value: CharacteristicValue): Promise<void> {
+    this.assertReachable();
+    const on = value === true || value === 1;
+    this.platform.log.info(`[MODE CHANGE] ${this.accessory.displayName}: HomeKit sent Auto Mode ${on ? 'on' : 'off'}`);
+    if (on) {
+      return this.queueIntent({ mode: 'auto' });
+    }
+    if (!this.isAutoModeActive(this.currentStatus)) {
+      setTimeout(() => this.refreshClimateCharacteristics(), 0);
+      return;
+    }
+    this.noteModeIntent('off');
+    return this.queueIntent({ active: false });
   }
 }
