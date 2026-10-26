@@ -8,7 +8,7 @@ import {
 } from './settings';
 import { cToF, quantizeSetpointInRange } from './temperature';
 import {
-  AUTO_MODE_SWITCH_NAME, HouseholdPrefs, householdPrefs, heatCoolInPlaceOfAuto, shouldKeepMode,
+  AUTO_MODE_SWITCH_NAME, HouseholdPrefs, householdPrefs, heatCoolInPlaceOfAuto, shouldKeepMode, logHouseholdPrefs,
 } from './household';
 
 // HeaterCooler implementation (2.0): portions derived from
@@ -292,7 +292,9 @@ export class KumoThermostatAccessory {
       .onSet(this.setCoolingThresholdTemperature.bind(this));
 
     // Fan speed and auto/manual live on a linked Fanv2 service (see setupFanService).
-    this.setupFanService();
+    if (!this.removeFanServiceIfHidden()) {
+      this.setupFanService();
+    }
 
     // Note: Polling is now handled at the platform level (centralized site polling)
     // This accessory will receive updates via updateFromZone()
@@ -3014,12 +3016,30 @@ export class KumoThermostatAccessory {
   private applyHouseholdTile(): void {
     const T = this.platform.Characteristic.TargetHeaterCoolerState;
     if (this.household.hideAutoMode) {
+      // Move a cached AUTO off first, or HAP warns and keeps serving it until the first update.
+      if (this.service.getCharacteristic(T).value === T.AUTO) {
+        this.service.updateCharacteristic(T, T.HEAT);
+      }
       this.service.getCharacteristic(T).setProps({ validValues: this.householdModes([T.AUTO, T.HEAT, T.COOL]) });
     }
+    logHouseholdPrefs(this.platform.log, this.household);
     if (this.household.autoModeSwitch &&
       this.accessory.getServiceById(this.platform.Service.Switch, 'auto-mode')) {
       this.setupAutoModeSwitch();
     }
+  }
+
+  /** hideFanSpeed: drop the Fanv2 (fan speed slider) service, cached one included. True if hidden. */
+  private removeFanServiceIfHidden(): boolean {
+    if (!this.household.hideFanSpeed) {
+      return false;
+    }
+    const existing = this.accessory.getServiceById(this.platform.Service.Fanv2, 'airflow');
+    if (existing) {
+      this.accessory.removeService(existing);
+      this.publishStructureChange();
+    }
+    return true;
   }
 
   /** The tile's TargetHeaterCoolerState choices, minus AUTO when it's hidden. */

@@ -74,6 +74,7 @@ export interface KumoConfig {
   hideAutoMode?: boolean;
   autoModeSwitch?: boolean;
   keepModeOnTempChange?: boolean;
+  hideFanSpeed?: boolean;
 }
 
 /** A one-way mirror: `target` follows `source` (both device serials). */

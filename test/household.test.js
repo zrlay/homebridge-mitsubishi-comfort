@@ -192,3 +192,36 @@ test('keepModeOnTempChange: the tile still reads the threshold the user set', as
   await Promise.all([handler.setCoolingThresholdTemperature(23), handler.setTargetHeaterCoolerState(T.HEAT)]);
   assert.ok(Math.abs(tile.getCharacteristic(COOL_SP).value - 23) < 0.5);
 });
+
+// ---- hideFanSpeed ---------------------------------------------------------
+
+test('defaults: the fan speed slider is there', () => {
+  const { accessory } = makeHarness();
+  assert.ok(accessory.getServiceById(Service.Fanv2, 'airflow'));
+});
+
+test('hideFanSpeed: no fan speed slider, and a cached one is removed', () => {
+  const fresh = makeHarness({ hideFanSpeed: true });
+  assert.strictEqual(fresh.accessory.getServiceById(Service.Fanv2, 'airflow'), null);
+
+  // A unit cached with a slider from a run before the option was turned on.
+  const { accessory } = makeHarness();
+  assert.ok(accessory.getServiceById(Service.Fanv2, 'airflow'));
+  const platform = {
+    Service, Characteristic, log: makeLog(), kumoConfig: { hideFanSpeed: true },
+    api: { updatePlatformAccessories() {} },
+  };
+  const kumoAPI = { subscribeToDevice() {}, onDeviceProfileUpdate() {}, sendCommand: () => Promise.resolve(true) };
+  const handler = new KumoThermostatAccessory(platform, accessory, kumoAPI, 30);
+  assert.strictEqual(accessory.getServiceById(Service.Fanv2, 'airflow'), null);
+  handler.updateFromZone(zone({ operationMode: 'heat' }));
+});
+
+test('hideFanSpeed: power and mode still work without the fan service', async () => {
+  const { handler, sent, applyProfile } = makeHarness({ hideFanSpeed: true });
+  applyProfile(profile({ hasFanSpeedAuto: true, numberOfFanSpeeds: 3 }));
+  handler.updateFromZone(zone({ operationMode: 'heat' }));
+  handler.updateFromZone(zone({ operationMode: 'off', power: 0 }));
+  await handler.setActive(A.ACTIVE);
+  assert.deepStrictEqual(sent, [{ operationMode: 'heat' }]);
+});

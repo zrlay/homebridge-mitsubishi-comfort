@@ -138,6 +138,12 @@
         "default": false,
         "description": "While a unit is heating or cooling, ignore a mode change HomeKit sends along with a temperature change (within 2 seconds). Fixes Siri flipping modes when you only asked for a temperature."
       },
+      "hideFanSpeed": {
+        "title": "Hide fan speed sliders",
+        "type": "boolean",
+        "default": false,
+        "description": "Remove the fan speed control from each unit. The unit keeps its current fan setting. To also hide the \"Fan Auto\" switch, turn off Show Fan Auto switches."
+      },
       "showDrySwitch": {
         "title": "Show Dry switches",
         "type": "boolean",
@@ -222,7 +228,7 @@
       "title": "Household Preferences",
       "expandable": true,
       "expanded": false,
-      "items": ["hideAutoMode", "autoModeSwitch", "keepModeOnTempChange"]
+      "items": ["hideAutoMode", "autoModeSwitch", "keepModeOnTempChange", "hideFanSpeed"]
     },
     {
       "type": "fieldset",
