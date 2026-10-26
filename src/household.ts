@@ -22,6 +22,9 @@ export interface HouseholdPrefs {
   // Drop a heat/cool/auto change that arrives alongside a temperature change
   // while the unit is already heating or cooling.
   keepModeOnTempChange: boolean;
+  // Drop the per-unit fan speed slider (the Fanv2 service). The Fan Auto switch
+  // is upstream's showFanAutoSwitch.
+  hideFanSpeed: boolean;
 }
 
 export function householdPrefs(config: KumoConfig | undefined): HouseholdPrefs {
@@ -29,7 +32,20 @@ export function householdPrefs(config: KumoConfig | undefined): HouseholdPrefs {
     hideAutoMode: config?.hideAutoMode === true,
     autoModeSwitch: config?.autoModeSwitch === true,
     keepModeOnTempChange: config?.keepModeOnTempChange === true,
+    hideFanSpeed: config?.hideFanSpeed === true,
   };
+}
+
+let loggedPrefs = false;
+
+/** One startup line saying which preferences are on, so the log shows the config took. */
+export function logHouseholdPrefs(log: { info(message: string): void }, prefs: HouseholdPrefs): void {
+  if (loggedPrefs) {
+    return;
+  }
+  loggedPrefs = true;
+  const on = (Object.keys(prefs) as Array<keyof HouseholdPrefs>).filter((k) => prefs[k]);
+  log.info(`Household preferences: ${on.length ? on.join(', ') : 'none (upstream behavior)'}`);
 }
 
 /**
